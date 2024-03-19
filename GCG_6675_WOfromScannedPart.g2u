@@ -1,0 +1,196 @@
+﻿Program.Sub.Preflight.Start
+Program.External.Include.Library("900100.lib")
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'Author: Arturo Almaguer
+'Date: 25th March 2022
+'Customer: Nyle Systems, quote number 13216
+'This project creates a WO from a scanned part if all criteria is met
+'This script is launched off hook one of the GS Mobile hooks 39###
+
+Function.Intrinsic.UI.UsePixels ' Allows you to use Pixels instead of Twips throughout
+
+F.Intrinsic.Control.Try
+
+	V.Local.sTransactionID.Declare(String)
+	V.Local.sSQL.Declare(String)
+	V.Local.sPart.Declare(String)
+	V.Local.sError.Declare(String)
+	V.Local.sQty.Declare(String)
+	V.Local.sLeadDays.Declare(String)
+	V.Local.dDueDate.Declare(Date)
+	V.Local.sReturn.Declare(String)
+	V.Local.sCode.Declare(String)
+	V.Local.sRouter.Declare(String)
+	V.Local.sFile.Declare(String)
+	V.Local.sContents.Declare(String)
+	V.Local.sReturnFile.Declare(String)
+	V.Local.sWO.Declare(String)
+	V.Local.sWOSuf.Declare(String)
+	V.Local.sData.Declare(String)
+	
+	V.Local.sTransactionID.Set(V.Passed.DATA-TRANSID)
+
+	'1. Retrieving the part number and qty from the transaction
+	F.Intrinsic.String.Build("select RTRIM(FIELD_1) PART, RTRIM(FIELD_2) QTY from V_WIRELESS_LINE where TRANS_ID = '{0}';", V.Local.sTransactionID, V.Local.sSQL)
+	F.ODBC.Connection!Con.OpenCompanyConnection
+	F.ODBC.Connection!Con.ExecuteAndReturn(V.Local.sSQL,V.Local.sData)
+	
+	f.Intrinsic.String.Split(V.Local.sData, "*!*", V.Local.sData)
+	V.Local.sPart.Set(V.Local.sData(0))
+	V.Local.sQty.Set(V.Local.sData(1))
+	
+	'2. Validating if part exists and if it is indeed a manufactured part
+	F.Intrinsic.String.Build("select RTRIM(CODE_SOURCE) CODE_SOURCE from V_INVENTORY_MST2 where PART = '{0}';", V.Local.sPart, V.Local.sSQL)
+	F.ODBC.Connection!Con.ExecuteAndReturn(V.Local.sSQL, V.Local.sCode)
+	
+	'Displaying error message if part doesn't exist
+	F.Intrinsic.Control.If(V.Ambient.ExecuteAndReturnEOF)
+		F.Intrinsic.String.Build("<font color={0}red{0}><b>Error: Part doesn't exist</b></font>",V.Ambient.DblQuote,V.Local.sError)
+		F.Global.Mobile.SetCustomResult(V.Caller.CompanyCode,V.Local.sTransactionID,V.Local.sError)
+		F.Intrinsic.Control.CallSub("Unload")
+	F.Intrinsic.Control.EndIf
+	
+	'Code Source should be either M or F to indicate it is a manufactured part.
+	'Displaying error message if part is not a manufactured one even though it does exist.
+	'F.Intrinsic.Control.If(V.Local.sCode, <>, "M", "OR", V.Local.sCode, <>, "F")
+	F.Intrinsic.Control.If(V.Local.sCode, <>, "M")
+		F.Intrinsic.Control.If(V.Local.sCode, <>, "F")
+			F.Intrinsic.String.Build("<font color={0}red{0}><b>Error: Part is not a manufactured one</b></font>",V.Ambient.DblQuote,V.Local.sError)
+			F.Global.Mobile.SetCustomResult(V.Caller.CompanyCode,V.Local.sTransactionID,V.Local.sError)
+			F.Intrinsic.Control.CallSub("Unload")
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+	
+	'3. Validating if an order quantity exists for the part
+	F.Intrinsic.Control.If(V.Local.sQty, =, "")
+		F.Intrinsic.String.Build("select QTY_ORDER from V_INVENTORY_MSTR where PART = '{0}';", V.Local.sPart, V.Local.sSQL)
+		F.ODBC.Connection!Con.ExecuteAndReturn(V.Local.sSQL, V.Local.sQty)
+	F.Intrinsic.Control.ElseIf(V.Local.sQty.Long, =, 0)
+		F.Intrinsic.String.Build("<font color={0}red{0}><b>Error: Part's Order Qty equals to 0</b></font>",V.Ambient.DblQuote,V.Local.sError)
+		F.Global.Mobile.SetCustomResult(V.Caller.CompanyCode,V.Local.sTransactionID,V.Local.sError)
+		F.Intrinsic.Control.CallSub("Unload")
+	F.Intrinsic.Control.EndIf
+	
+	'4. Validating the lead days for the part
+	F.Intrinsic.String.Build("select TIME_MATERIAL_LEAD from V_INVENTORY_MSTR where PART = '{0}';", V.Local.sPart, V.Local.sSQL)
+	F.ODBC.Connection!Con.ExecuteAndReturn(V.Local.sSQL, V.Local.sLeadDays)
+	
+	'5. Validating if a router exists for the part
+	F.Intrinsic.String.Build("select ROUTER from V_ROUTER_HEADER where ROUTER = '{0}';", V.Local.sPart, V.Local.sSQL)
+	F.ODBC.Connection!Con.ExecuteAndReturn(V.Local.sSQL, V.Local.sRouter)
+	
+	'Displaying error message if there is no router for the part
+	F.Intrinsic.Control.If(V.Ambient.ExecuteAndReturnEOF)
+		F.Intrinsic.String.Build("<font color={0}red{0}><b>Error: Router doesn't exist for the part</b></font>",V.Ambient.DblQuote,V.Local.sError)
+		F.Global.Mobile.SetCustomResult(V.Caller.CompanyCode,V.Local.sTransactionID,V.Local.sError)
+		F.Intrinsic.Control.CallSub("Unload")
+	F.Intrinsic.Control.EndIf
+	
+	'6. Calculating WO Due Date
+	F.Intrinsic.Date.DateAdd("D", V.Local.sLeadDays.Long, V.Ambient.Date, V.Local.dDueDate)
+	
+	'7. Creating new WO by using callwrapper
+	F.Intrinsic.Control.CallSub("CheckDir")
+
+	'V.Args.Path, building file
+	F.Intrinsic.String.Build("{0}\{1}.txt", V.Args.Path, V.Local.sPart, V.Local.sFile)
+	
+	'Input required parameters: Part *!* Rev *!* Loc *!*WO Due Date *!* WO Run Qty
+	f.Intrinsic.String.Build("{0}*!**!**!*{1}*!*{2}", V.Local.sPart, V.Local.dDueDate.FormatMM/DD/YYYY, V.Local.sQty.Long, V.Local.sContents)
+	F.Intrinsic.File.String2File(V.Local.sFile, V.Local.sContents)
+	
+	'Calling callwrapper
+	F.Global.Callwrapper.New("CreateWO", "Manufacturing.CreateWorkOrderFinishedGoodPart")
+	
+	'Setting property and running callwrapper
+	F.Global.Callwrapper.SetProperty("CreateWO", "FileName", V.Local.sFile)
+	F.Global.Callwrapper.Run("CreateWO")
+	
+	'Processing return file
+	F.Intrinsic.File.File2String(V.Local.sFile, V.Local.sReturnFile)
+	F.Intrinsic.String.Split(V.Local.sReturnFile, "*!*", V.Local.sReturnFile)
+	
+	'Status (one byte) as : 
+	'-SORT-WO-CREATED VALUE "Y". SORT-BAD-RTR VALUE "R". SORT-BAD-RTR-ALT VALUE "A". SORT-GOOD-CALL-PROCESS-FAILED VALUE "B". SORT-BAD-CALL-RETURN VALUE "X". 
+	
+	'If the WO was created, then report number back and print barcoded WO. Show error message if it wasnt successfully created.
+	F.Intrinsic.Control.If(v.Local.sReturnFile(3), =, "Y")
+		
+		'Setting variables
+		V.Local.sWO.Set(v.Local.sReturnFile(4))
+		V.Local.sWOSuf.Set(v.Local.sReturnFile(5))
+		
+		'8. Reporting new WO number back to Mobile User
+		F.Intrinsic.String.Build("<font color={0}green{0}><b>Newly generated WO number: {1}-{2}</b></font><br>",V.Ambient.DblQuote, V.Local.sWO, V.Local.sWOSuf, V.Local.sReturn)
+		F.Global.Mobile.SetCustomResult(V.Caller.CompanyCode,V.Local.sTransactionID,V.Local.sReturn)
+		
+		'9.Using callwrapper 900100's library to print barcoded WO for recently created WO. Report ID specifically asked by the customer.
+		F.Data.DataTable.AddRow("900100","WO_Num", V.Local.sWO, "WO_Suf", V.Local.sWOSuf, "WO_RPTID", "1811")
+		
+		'Calling callwrapper 900100
+		F.Intrinsic.Control.CallSub("900100Sync")
+		
+	f.Intrinsic.Control.Else
+		
+		'Displaying error message back to user
+		F.Intrinsic.String.Build("<font color={0}red{0}><b>Error: WO creation process failed. WO wasn't created.</b></font>",V.Ambient.DblQuote,V.Local.sError)
+		F.Global.Mobile.SetCustomResult(V.Caller.CompanyCode,V.Local.sTransactionID,V.Local.sError)
+		F.Intrinsic.Control.CallSub("Unload")
+		
+	F.Intrinsic.Control.EndIf
+	
+	F.ODBC.Connection!Con.Close
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.String.Build("<font color={6}red{6}><b>Project: {0}{1}<br>{1}<br>Subroutine: {2}{1}<br>Error Occurred {3} with description {4}{1}<br>{1}<br>GAB Version: {5}</b></font>",V.Caller.ScriptFile,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Ambient.DblQuote,V.Local.sError)
+	F.Global.Mobile.SetCustomResult(V.Caller.CompanyCode,V.Local.sTransactionID,V.Local.sError)
+	F.Intrinsic.Control.End
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.Main.End
+Program.Sub.Unload.Start
+'Closes the connection if it is open
+f.Intrinsic.Control.If(v.ODBC.con.exists,=,"1") 	
+    f.ODBC.Connection!Con.Close
+f.Intrinsic.Control.EndIf
+
+'Ending program
+F.Intrinsic.Control.End
+Program.Sub.Unload.End
+Program.Sub.CheckDir.Start
+'Checks if custom directory exist, creates it if it doesn't
+
+F.Intrinsic.Control.Try
+
+	V.Local.sPath.Declare(String)
+	V.Local.bExists.Declare(Boolean)
+	V.Local.sError.Declare(String)
+	
+	F.Intrinsic.String.Build("{0}\CUSTOM\6675", V.Caller.GlobalDir, V.Local.sPath)
+	
+	F.Intrinsic.File.DirExists(V.Local.sPath, V.Local.bExists)
+	F.Intrinsic.Control.If(V.Local.bExists.Not)
+		
+		F.Intrinsic.File.CreateDir(V.Local.sPath)
+	
+	F.Intrinsic.Control.EndIf
+	
+	F.Intrinsic.Variable.AddRV("Path", V.Local.sPath)
+	
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.String.Build("<font color={6}red{6}><b>Project: {0}{1}<br>{1}<br>Subroutine: {2}{1}<br>Error Occurred {3} with description {4}{1}<br>{1}<br>GAB Version: {5}</b></font>",V.Caller.ScriptFile,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Ambient.DblQuote,V.Local.sError)
+	F.Global.Mobile.SetCustomResult(V.Caller.CompanyCode,V.Args.sTransID,V.Local.sError)
+	F.Intrinsic.Control.End
+	
+F.Intrinsic.Control.EndTry
+Program.Sub.CheckDir.End
+
+Program.Sub.Comments.Start
+${$5$}$3.0.0.0$}$1
+${$6$}$apadilla$}$20220413120743979$}$Lag9STqBJOmNXSbd5+msRcBWPGz0aFqSzPePUG9qWbzyBQWQuClodaUp8j2iZKD4gJ6Q4K1Li/A2L+Sd1aRbuQ==
+Program.Sub.Comments.End
